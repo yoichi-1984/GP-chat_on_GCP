@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GP Chat Login</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 40px; background: #f4f4f9; display: flex; justify-content: center; }
+    .card { width: 100%; max-width: 400px; padding: 30px; background: white; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    h2 { text-align: center; color: #333; margin-bottom: 20px; }
+    input { width: 100%; padding: 12px; margin: 8px 0; box-sizing: border-box; border: 1px solid #ddd; border-radius: 4px; }
+    button { width: 100%; padding: 12px; margin-top: 20px; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    #msg { margin-top: 15px; color: #d32f2f; text-align: center; font-size: 0.9em; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>GP Chat ログイン</h2>
+    <input id="email" type="email" placeholder="メールアドレス" />
+    <input id="password" type="password" placeholder="パスワード" />
+    <button id="loginBtn">ログイン</button>
+    <div id="msg"></div>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+
+    const CLOUD_RUN_URL = "<YOUR URL>";
+
+    const firebaseConfig = {
+      apiKey: "YOUR DATA",
+      authDomain: "YOUR DATA",
+      projectId: "YOUR DATA",
+      storageBucket: "YOUR DATA",
+      messagingSenderId: "YOUR DATA",
+      appId: "YOUR DATA",
+      measurementId: "YOUR DATA",
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+
+    document.getElementById("loginBtn").addEventListener("click", async () => {
+      const btn = document.getElementById("loginBtn");
+      const msg = document.getElementById("msg");
+      const email = document.getElementById("email").value;
+      const pass = document.getElementById("password").value;
+
+      if (!email || !pass) {
+        msg.textContent = "メールアドレスとパスワードを入力してください";
+        return;
+      }
+
+      btn.disabled = true;
+      msg.textContent = "認証中...";
+
+      try {
+        // 1. Firebase Authログイン
+        const cred = await signInWithEmailAndPassword(auth, email, pass);
+        const token = await cred.user.getIdToken();
+
+        // 2. Cookie取得 (Cloud Runへ)
+        msg.textContent = "セッション確立中...";
+        const res = await fetch(`${CLOUD_RUN_URL}/sessionLogin`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ idToken: token }),
+          credentials: "include" 
+        });
+
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(`サーバー認証エラー: ${res.status} ${txt}`);
+        }
+
+        // 3. アプリへ遷移 (firebase.jsonのredirects設定によりCloud Runへ飛ぶ)
+        window.location.assign("/app/");
+
+      } catch (e) {
+        console.error(e);
+        msg.textContent = e.message;
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

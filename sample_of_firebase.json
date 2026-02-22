@@ -1,0 +1,25 @@
+{
+  "hosting": [
+    {
+      "target": "gpchat",
+      "public": "public",
+      "ignore": [
+        "firebase.json",
+        "**/.*",
+        "**/node_modules/**"
+      ],
+      "redirects": [
+        {
+          "source": "/app/**",
+          "destination": "<YOUR URL>",
+          "type": 302
+        },
+        {
+          "source": "/",
+          "destination": "/login/",
+          "type": 302
+        }
+      ]
+    }
+  ]
+}
