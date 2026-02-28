@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gp-chat"
-version = "0.1.0" 
+version = "0.1.1" 
 description = "GP-chat on GCP"
 authors = [
     { name = "yoichi-1984", email = "yoichi.1984.engineer@gmail.com" },
@@ -26,7 +26,9 @@ dependencies = [
     "uvicorn==0.41.0",
     "firebase-admin==7.1.0",
     "httpx==0.28.1",
-    "websockets==15.0.1"
+    "websockets==15.0.1",
+    "cryptography",
+    "google-cloud-firestore"    
 ]
 
 [project.scripts]

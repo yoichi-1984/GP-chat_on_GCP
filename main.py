@@ -3,6 +3,7 @@ import json
 import sys
 import time
 import traceback
+from datetime import datetime
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -10,11 +11,11 @@ from google import genai
 from google.genai import types
 from streamlit_ace import st_ace
 
-# --- Import Logic ---
 try:
     from gp_chat import config
     from gp_chat import utils
     from gp_chat import sidebar
+    from gp_chat import firestore_utils
 except ImportError as e:
     st.error(f"Critical System Error: Failed to import application modules. {e}")
     st.stop()
@@ -49,23 +50,36 @@ def load_history(uploader_key):
 # --- Streamlit Application ---
 def run_chatbot_app():
     st.set_page_config(page_title=config.UITexts.APP_TITLE, layout="wide")
-
-    # 修正: ここにあった check_password 関数と呼び出し処理を削除しました
-
     st.title(config.UITexts.APP_TITLE)
 
     if "debug_logs" not in st.session_state: st.session_state["debug_logs"] = []
+
+    # --- ユーザーID(UID)の取得を強化 (クリーンな構文) ---
+    user_uid = "unknown"
+    try:
+        if hasattr(st, "context"):
+            # 1. プロキシからのヘッダー(X-User-UID)を確認
+            headers = st.context.headers
+            if "X-User-UID" in headers and headers["X-User-UID"] != "unknown":
+                user_uid = headers["X-User-UID"]
+            
+            # 2. ヘッダーになければCookieのセッショントークンから直接検証
+            cookies = st.context.cookies
+            if user_uid == "unknown" and "session" in cookies:
+                from firebase_admin import auth
+                session_cookie = cookies["session"]
+                decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False)
+                user_uid = decoded_claims.get("uid", "unknown")
+    except Exception as e:
+        add_debug_log(f"UID fetch error: {e}", "error")
 
     # 必要なモジュールの読み込み
     PROMPTS = utils.load_prompts()
     APP_CONFIG = utils.load_app_config()
     supported_extensions = APP_CONFIG.get("file_uploader", {}).get("supported_extensions", [])
-
-    # --- 【重要】Cloud Run対応の環境チェック ---
     env_files = utils.find_env_files()
     is_cloud_env = os.getenv("GCP_PROJECT_ID") is not None
 
-    # .envがなく、かつCloud環境変数もない場合のみエラーにする
     if not env_files and not is_cloud_env:
         st.error("設定エラー: .env ファイルが見つからず、環境変数も設定されていません。")
         st.stop()
@@ -75,13 +89,17 @@ def run_chatbot_app():
         if key not in st.session_state:
             st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
 
+    if "chat_title" not in st.session_state: 
+        st.session_state["chat_title"] = None
+
     # Sidebar Render
     sidebar.render_sidebar(
         supported_extensions, env_files, load_history, 
         lambda i: st.session_state['python_canvases'].__setitem__(i, config.ACE_EDITOR_DEFAULT_CODE),
         lambda i, m: (st.session_state['messages'].append({"role": "user", "content": config.UITexts.REVIEW_PROMPT_MULTI.format(i=i+1) if m else config.UITexts.REVIEW_PROMPT_SINGLE}), st.session_state.__setitem__('is_generating', True)),
         lambda i: utils.run_pylint_validation(st.session_state['python_canvases'][i], i, PROMPTS),
-        lambda i, k: st.session_state['python_canvases'].__setitem__(i, st.session_state[k].getvalue().decode("utf-8")) if st.session_state.get(k) else None
+        lambda i, k: st.session_state['python_canvases'].__setitem__(i, st.session_state[k].getvalue().decode("utf-8")) if st.session_state.get(k) else None,
+        user_uid=user_uid
     )
 
     # --- Environment Loading ---
@@ -104,7 +122,7 @@ def run_chatbot_app():
         st.caption("Check your GCP_PROJECT_ID and Region settings.")
         st.stop()
 
-    st.caption(f"Backend: {model_id} | Location: {location}")
+    st.caption(f"Backend: {model_id} | Location: {location} | User: {user_uid}")
 
     # Debug Logs
     with st.expander("🛠 システムログ", expanded=False):
@@ -134,7 +152,7 @@ def run_chatbot_app():
                     st.caption(f"Tokens: In {u['input_tokens']:,} / Out {u['output_tokens']:,}")
 
     # Input Area
-    if prompt := st.chat_input("指示を入力...", disabled=st.session_state['is_generating']):
+    if prompt := st.chat_input("指示を入力...", disabled=st.session_state.get('is_generating', False)):
         st.session_state['messages'].append({"role": "user", "content": prompt})
         st.session_state['is_generating'] = True
         st.rerun()
@@ -242,7 +260,40 @@ def run_chatbot_app():
                 st.error(f"Generation Error: {e}")
             finally:
                 st.session_state['is_generating'] = False
-                st.rerun()
+
+        # --- 2回目の発言でタイトル自動生成＆Firestore保存 ---
+        user_msgs = [m['content'] for m in st.session_state['messages'] if m["role"] == "user"]
+        
+        if len(user_msgs) >= 2 and not st.session_state.get('chat_title'):
+            try:
+                title_prompt = f"以下の2つのユーザー発言を要約し、チャットのファイル名となるタイトルを20文字以内で生成してください。結果の文字列のみ出力し、改行や記号は含めないでください。\n1: {user_msgs[0]}\n2: {user_msgs[1]}"
+                
+                # ★修正: 固定のモデル名ではなく、メインのチャットで動いているモデル(`model_id`)をそのまま使用する
+                title_res = client.models.generate_content(
+                    model=model_id,
+                    contents=title_prompt
+                )
+                date_str = datetime.now().strftime("%y%m%d")
+                clean_title = title_res.text.strip().replace("/", "_").replace("\\", "_")
+                st.session_state['chat_title'] = f"{date_str}_{clean_title}.json"
+                add_debug_log(f"Title generated: {clean_title}")
+            except Exception as e:
+                # ★修正: なぜタイトル生成に失敗したのかをシステムログに残す
+                add_debug_log(f"Title Generation Error: {e}", "error")
+                st.session_state['chat_title'] = f"{datetime.now().strftime('%y%m%d')}_新規チャット.json"
+
+        # Firestoreへ履歴を同期保存
+        if st.session_state.get('chat_title'):
+            firestore_utils.save_chat_to_firestore(
+                uid=user_uid,
+                chat_title=st.session_state['chat_title'],
+                messages=st.session_state['messages'],
+                is_encrypted=st.session_state.get('use_encryption', False),
+                password=st.session_state.get('encryption_password', "")
+            )
+        
+        st.rerun()
 
 if __name__ == "__main__":
     run_chatbot_app()
+    

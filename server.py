@@ -1,4 +1,3 @@
-# server.py:
 import os
 import subprocess
 import asyncio
@@ -15,6 +14,10 @@ from fastapi.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 import firebase_admin
 from firebase_admin import auth
+from dotenv import load_dotenv # ★追加: .env 読み込み用
+
+# ★追加: .env ファイルがあればロードする
+load_dotenv()
 
 # --- ログ設定 ---
 def log(msg):
@@ -25,8 +28,8 @@ def log(msg):
 # 1. 環境変数からポートとURL設定を取得
 STREAMLIT_PORT = int(os.getenv("STREAMLIT_PORT", 8501))
 TARGET_URL = f"http://127.0.0.1:{STREAMLIT_PORT}"
-# Cloud Run等の環境変数 HOSTING_URL がない場合はローカル開発用URLをデフォルトに
-HOSTING_URL = os.getenv("HOSTING_URL", "http://localhost:8080")
+# ★修正: .envがない場合でも本番のURLに飛ぶようにフォールバックを設定
+HOSTING_URL = os.getenv("HOSTING_URL", "https://gen-lang-client-0383480329.web.app")
 
 # 2. JSONファイルから許可IPリストをロード
 ALLOWED_NETWORKS = []
@@ -113,7 +116,8 @@ client = httpx.AsyncClient(timeout=120.0, follow_redirects=True)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        HOSTING_URL,
+        "https://gen-lang-client-0383480329.web.app", 
+        "https://gen-lang-client-0383480329.firebaseapp.com",
         "http://localhost:8501",
         "http://127.0.0.1:8501",
         "http://localhost:8080"
@@ -199,13 +203,38 @@ async def websocket_proxy(ws: WebSocket, path: str):
     subprotocol = protocols.split(",")[0].strip() if protocols else None
     await ws.accept(subprotocol=subprotocol)
 
+    # ★追加: WebSocket通信時にもCookieからユーザーID(UID)を抽出する
+    user_uid = "unknown"
+    cookie = ws.cookies.get("session")
+    if cookie:
+        try:
+            decoded_claims = auth.verify_session_cookie(cookie, check_revoked=False)
+            user_uid = decoded_claims.get("uid", "unknown")
+        except:
+            pass
+
     target_path = path if path else ""
     ws_url = f"ws://127.0.0.1:{STREAMLIT_PORT}/{target_path}"
     if ws.query_params:
         ws_url += f"?{ws.query_params}"
 
+    # ★追加: StreamlitへのWebSocket接続時にUIDをヘッダーとして渡す
+    extra_headers = {"X-User-UID": user_uid}
+
     try:
-        async with websockets.connect(ws_url) as ws_server:
+        # ライブラリのバージョン差異を吸収するための安全な接続処理
+        connect_kwargs = {}
+        try:
+            import inspect
+            sig = inspect.signature(websockets.connect)
+            if "additional_headers" in sig.parameters:
+                connect_kwargs["additional_headers"] = extra_headers
+            else:
+                connect_kwargs["extra_headers"] = extra_headers
+        except Exception:
+            connect_kwargs["extra_headers"] = extra_headers
+
+        async with websockets.connect(ws_url, **connect_kwargs) as ws_server:
             # Client -> Server
             async def client_to_server():
                 try:
@@ -259,6 +288,9 @@ async def proxy_handler(request: Request, path: str):
         path.endswith(".woff2")
     )
 
+    # デフォルト値を事前に設定しておく
+    user_uid = "unknown"
+
     # 認証チェック (静的ファイル以外)
     if not is_static:
         cookie = request.cookies.get("session")
@@ -268,10 +300,12 @@ async def proxy_handler(request: Request, path: str):
                 return RedirectResponse(f"{HOSTING_URL}/login/")
             return Response(status_code=401)
         try:
-            auth.verify_session_cookie(cookie, check_revoked=True)
+            # decoded_claims を受け取り、uid を抽出する
+            decoded_claims = auth.verify_session_cookie(cookie, check_revoked=True)
+            user_uid = decoded_claims.get("uid", "unknown")
         except:
             return RedirectResponse(f"{HOSTING_URL}/login/")
-
+            
     # リクエストの転送
     target_path = f"/{path}" if path else "/"
     url = f"{TARGET_URL}{target_path}"
@@ -282,7 +316,8 @@ async def proxy_handler(request: Request, path: str):
     req_headers = dict(request.headers)
     req_headers.pop("host", None)
     req_headers.pop("content-length", None)
-
+    req_headers["X-User-UID"] = user_uid
+    
     try:
         body = await request.body()
         rp_req = client.build_request(request.method, url, headers=req_headers, content=body)
@@ -301,3 +336,4 @@ async def proxy_handler(request: Request, path: str):
     except Exception as e:
         log(f"❌ HTTP Proxy Error: {url} -> {e}")
         return Response("Internal Proxy Error", status_code=500)
+    
