@@ -1,0 +1,14 @@
+{
+  "allowed_networks": [
+    "0.0.0.0/0"
+  ],
+  "allow_origins": [
+    "https://gen-lang-client-xxxxxxxx.web.app",
+    "https://gen-lang-client-xxxxxxxx.firebaseapp.com",
+    "https://gp-chat-on-gcp-xxxxxxxx.run.app",
+    "https://gp-chat-on-gcp-xxxxxxxx.run.app",
+    "http://localhost:8501",
+    "http://127.0.0.1:8501",
+    "http://localhost:8080"
+  ]
+}

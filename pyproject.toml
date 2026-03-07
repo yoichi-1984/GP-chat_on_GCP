@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gp-chat"
-version = "0.1.1" 
+version = "0.1.2" 
 description = "GP-chat on GCP"
 authors = [
     { name = "yoichi-1984", email = "yoichi.1984.engineer@gmail.com" },
@@ -29,6 +29,7 @@ dependencies = [
     "websockets==15.0.1",
     "cryptography",
     "google-cloud-firestore"    
+    "streamlit-paste-button"
 ]
 
 [project.scripts]

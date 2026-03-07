@@ -261,14 +261,15 @@ def run_chatbot_app():
             finally:
                 st.session_state['is_generating'] = False
 
-        # --- 2回目の発言でタイトル自動生成＆Firestore保存 ---
+        # --- ★修正: 1回目の発言でタイトル自動生成＆Firestore保存 ---
         user_msgs = [m['content'] for m in st.session_state['messages'] if m["role"] == "user"]
-        
-        if len(user_msgs) >= 2 and not st.session_state.get('chat_title'):
+
+        # user_msgsが1以上になったらタイトルを生成する
+        if len(user_msgs) >= 1 and not st.session_state.get('chat_title'):
             try:
-                title_prompt = f"以下の2つのユーザー発言を要約し、チャットのファイル名となるタイトルを20文字以内で生成してください。結果の文字列のみ出力し、改行や記号は含めないでください。\n1: {user_msgs[0]}\n2: {user_msgs[1]}"
-                
-                # ★修正: 固定のモデル名ではなく、メインのチャットで動いているモデル(`model_id`)をそのまま使用する
+                # 1つの発言だけで要約させるようにプロンプトを変更
+                title_prompt = f"以下のユーザー発言を要約し、チャットのファイル名となるタイトルを20文字以内で生成してください。結果の文字列のみ出力し、改行や記号は含めないでください。\n{user_msgs[0]}"
+
                 title_res = client.models.generate_content(
                     model=model_id,
                     contents=title_prompt
@@ -278,11 +279,10 @@ def run_chatbot_app():
                 st.session_state['chat_title'] = f"{date_str}_{clean_title}.json"
                 add_debug_log(f"Title generated: {clean_title}")
             except Exception as e:
-                # ★修正: なぜタイトル生成に失敗したのかをシステムログに残す
                 add_debug_log(f"Title Generation Error: {e}", "error")
                 st.session_state['chat_title'] = f"{datetime.now().strftime('%y%m%d')}_新規チャット.json"
 
-        # Firestoreへ履歴を同期保存
+        # Firestoreへ履歴を同期保存 (chat_titleが生成されていれば実行される)
         if st.session_state.get('chat_title'):
             firestore_utils.save_chat_to_firestore(
                 uid=user_uid,
@@ -296,4 +296,3 @@ def run_chatbot_app():
 
 if __name__ == "__main__":
     run_chatbot_app()
-    

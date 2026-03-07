@@ -25,9 +25,20 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
 
         # --- 修正: コールバック関数を使用してリセット処理を行う ---
         def reset_conversation():
+            # 1. パスワードと認証状態を一時退避
+            saved_pass = st.session_state.get('encryption_password', "")
+            saved_valid = st.session_state.get('is_password_valid', False)
+            saved_input = st.session_state.get('enc_pass_input', "")
+
+            # 2. 会話の初期化 (デフォルト設定のロード)
             for k, v in config.SESSION_STATE_DEFAULTS.items(): 
                 st.session_state[k] = v
             st.session_state['chat_title'] = None
+
+            # 3. 退避したパスワード状態を復元
+            st.session_state['encryption_password'] = saved_pass
+            st.session_state['is_password_valid'] = saved_valid
+            st.session_state['enc_pass_input'] = saved_input
 
         st.button("会話をリセット", on_click=reset_conversation)
 
@@ -54,7 +65,7 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
 
         st.text_input(
             "暗号化キー (初回入力で固定されます)", 
-            value=st.session_state['encryption_password'], 
+            # value=st.session_state['encryption_password'], 
             type="password", 
             key="enc_pass_input",
             on_change=on_password_change
@@ -199,4 +210,3 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
             """,
             unsafe_allow_html=True
         )
-        

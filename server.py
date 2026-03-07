@@ -29,27 +29,44 @@ def log(msg):
 STREAMLIT_PORT = int(os.getenv("STREAMLIT_PORT", 8501))
 TARGET_URL = f"http://127.0.0.1:{STREAMLIT_PORT}"
 # ★修正: .envがない場合でも本番のURLに飛ぶようにフォールバックを設定
-HOSTING_URL = os.getenv("HOSTING_URL", "https://gen-lang-client-0383480329.web.app")
+HOSTING_URL = os.getenv("HOSTING_URL",)
 
-# 2. JSONファイルから許可IPリストをロード
+# 2. JSONファイルから許可IPリストおよび許可オリジン(CORS)をロード
 ALLOWED_NETWORKS = []
+ALLOW_ORIGINS = []
+
 try:
     # Dockerコンテナ内では /app/ip_config.json に配置されます
     config_path = "ip_config.json"
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
+            
+            # 許可IPネットワークの読み込み
             for ip_str in config_data.get("allowed_networks", []):
                 try:
                     ALLOWED_NETWORKS.append(ipaddress.ip_network(ip_str.strip()))
                 except ValueError:
                     log(f"⚠️ Config Error: Invalid IP format '{ip_str}'")
-        log(f"✅ Loaded {len(ALLOWED_NETWORKS)} allowed networks from {config_path}.")
+            
+            # 許可オリジン(CORS)の読み込み
+            ALLOW_ORIGINS = config_data.get("allow_origins", [])
+            
+        log(f"✅ Loaded {len(ALLOWED_NETWORKS)} networks and {len(ALLOW_ORIGINS)} origins from {config_path}.")
     else:
         raise FileNotFoundError
 except (FileNotFoundError, json.JSONDecodeError):
-    log("⚠️ ip_config.json not found or invalid. Defaulting to localhost only for safety.")
+    log("⚠️ ip_config.json not found or invalid. Using default safety settings.")
+
+# 安全のためのフォールバック設定
+if not ALLOWED_NETWORKS:
     ALLOWED_NETWORKS.append(ipaddress.ip_network("127.0.0.1/32"))
+if not ALLOW_ORIGINS:
+    ALLOW_ORIGINS = [
+        "http://localhost:8501",
+        "http://127.0.0.1:8501",
+        "http://localhost:8080"
+    ]
 
 
 # --- Firebase初期化 ---
@@ -112,16 +129,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 client = httpx.AsyncClient(timeout=120.0, follow_redirects=True)
 
-# CORS設定
+# CORS設定 (外部JSONから読み込んだリストを使用)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://gen-lang-client-0383480329.web.app", 
-        "https://gen-lang-client-0383480329.firebaseapp.com",
-        "http://localhost:8501",
-        "http://127.0.0.1:8501",
-        "http://localhost:8080"
-    ],
+    allow_origins=ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -130,6 +141,10 @@ app.add_middleware(
 # --- ★IP制限ミドルウェア (CIDR対応版) ---
 @app.middleware("http")
 async def ip_restriction_middleware(request: Request, call_next):
+    # 1. CORSプリフライトリクエストはIP制限をスキップして後段に渡す
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     # Cloud Runでは 'X-Forwarded-For' の先頭がクライアントの真のIP
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
@@ -138,7 +153,6 @@ async def ip_restriction_middleware(request: Request, call_next):
         client_ip_str = request.client.host
 
     # ヘルスチェック(Cloud Run内部からのアクセス)は常に許可
-    # User-AgentがGoogleHC (Google Health Check) の場合も考慮
     if request.url.path == "/_stcore/health" and (client_ip_str == "127.0.0.1" or "GoogleHC" in request.headers.get("User-Agent", "")):
         return await call_next(request)
 
@@ -154,14 +168,28 @@ async def ip_restriction_middleware(request: Request, call_next):
 
         if not is_allowed:
             log(f"⛔ Access Denied: IP {client_ip_str} is NOT in allowed networks.")
+            # 2. ブロック時にもCORSヘッダーを付与してブラウザに正しいエラーを認識させる
+            origin = request.headers.get("origin", "*")
             return JSONResponse(
                 status_code=403, 
-                content={"error": "Access Denied: Restricted Network (Corporate Proxy Only)."}
+                content={"error": "Access Denied: Restricted Network (Corporate Proxy Only)."},
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Credentials": "true"
+                }
             )
 
     except ValueError:
         log(f"⚠️ Invalid IP Format received: {client_ip_str}")
-        return JSONResponse(status_code=403, content={"error": "Invalid IP Address"})
+        origin = request.headers.get("origin", "*")
+        return JSONResponse(
+            status_code=403, 
+            content={"error": "Invalid IP Address"},
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
 
     response = await call_next(request)
     return response
@@ -305,7 +333,7 @@ async def proxy_handler(request: Request, path: str):
             user_uid = decoded_claims.get("uid", "unknown")
         except:
             return RedirectResponse(f"{HOSTING_URL}/login/")
-            
+
     # リクエストの転送
     target_path = f"/{path}" if path else "/"
     url = f"{TARGET_URL}{target_path}"
@@ -317,7 +345,7 @@ async def proxy_handler(request: Request, path: str):
     req_headers.pop("host", None)
     req_headers.pop("content-length", None)
     req_headers["X-User-UID"] = user_uid
-    
+
     try:
         body = await request.body()
         rp_req = client.build_request(request.method, url, headers=req_headers, content=body)
@@ -336,4 +364,3 @@ async def proxy_handler(request: Request, path: str):
     except Exception as e:
         log(f"❌ HTTP Proxy Error: {url} -> {e}")
         return Response("Internal Proxy Error", status_code=500)
-    

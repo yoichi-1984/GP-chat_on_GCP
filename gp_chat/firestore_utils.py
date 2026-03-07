@@ -12,7 +12,7 @@ from firebase_admin import firestore
 try:
     if not firebase_admin._apps:
         firebase_admin.initialize_app()
-    db = firestore.client(database_id="gp-chat-log-store")
+    db = firestore.client(database_id="gp-chat-db")
 except Exception as e:
     print(f"[Firestore Init Error] {e}", flush=True)
     db = None
