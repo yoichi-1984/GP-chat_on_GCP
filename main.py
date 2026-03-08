@@ -3,6 +3,9 @@ import json
 import sys
 import time
 import traceback
+import re
+import tempfile
+import base64
 from datetime import datetime
 
 import streamlit as st
@@ -16,6 +19,7 @@ try:
     from gp_chat import utils
     from gp_chat import sidebar
     from gp_chat import firestore_utils
+    from gp_chat import execution_engine
 except ImportError as e:
     st.error(f"Critical System Error: Failed to import application modules. {e}")
     st.stop()
@@ -54,16 +58,13 @@ def run_chatbot_app():
 
     if "debug_logs" not in st.session_state: st.session_state["debug_logs"] = []
 
-    # --- ユーザーID(UID)の取得を強化 (クリーンな構文) ---
     user_uid = "unknown"
     try:
         if hasattr(st, "context"):
-            # 1. プロキシからのヘッダー(X-User-UID)を確認
             headers = st.context.headers
             if "X-User-UID" in headers and headers["X-User-UID"] != "unknown":
                 user_uid = headers["X-User-UID"]
             
-            # 2. ヘッダーになければCookieのセッショントークンから直接検証
             cookies = st.context.cookies
             if user_uid == "unknown" and "session" in cookies:
                 from firebase_admin import auth
@@ -73,7 +74,6 @@ def run_chatbot_app():
     except Exception as e:
         add_debug_log(f"UID fetch error: {e}", "error")
 
-    # 必要なモジュールの読み込み
     PROMPTS = utils.load_prompts()
     APP_CONFIG = utils.load_app_config()
     supported_extensions = APP_CONFIG.get("file_uploader", {}).get("supported_extensions", [])
@@ -84,7 +84,6 @@ def run_chatbot_app():
         st.error("設定エラー: .env ファイルが見つからず、環境変数も設定されていません。")
         st.stop()
 
-    # Session State Init
     for key, value in config.SESSION_STATE_DEFAULTS.items():
         if key not in st.session_state:
             st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
@@ -92,7 +91,6 @@ def run_chatbot_app():
     if "chat_title" not in st.session_state: 
         st.session_state["chat_title"] = None
 
-    # Sidebar Render
     sidebar.render_sidebar(
         supported_extensions, env_files, load_history, 
         lambda i: st.session_state['python_canvases'].__setitem__(i, config.ACE_EDITOR_DEFAULT_CODE),
@@ -102,7 +100,6 @@ def run_chatbot_app():
         user_uid=user_uid
     )
 
-    # --- Environment Loading ---
     if env_files:
         load_dotenv(dotenv_path=st.session_state.get('selected_env_file', env_files[0]), override=True)
 
@@ -114,36 +111,29 @@ def run_chatbot_app():
     OUTPUT_LIMIT = 65536
     max_tokens_val = min(int(os.getenv("MAX_TOKEN", "65536")), OUTPUT_LIMIT)
 
-    # Client Init
     try:
         client = genai.Client(vertexai=True, project=project_id, location=location)
     except Exception as e:
         st.error(f"Client init error: {e}")
-        st.caption("Check your GCP_PROJECT_ID and Region settings.")
         st.stop()
 
-    st.caption(f"Backend: {model_id} | Location: {location} | User: {user_uid}")
-
-    # Debug Logs
     with st.expander("🛠 システムログ", expanded=False):
         for log in reversed(st.session_state["debug_logs"]):
             st.text(log)
 
-    # System Prompt Setup
     if not st.session_state['system_role_defined']:
         st.subheader("AIの役割を設定")
-        role = st.text_area("System Role", value=PROMPTS.get("system", {}).get("text", ""), height=200)
+        role = st.text_area("System Role", value=PROMPTS.get("system", {}).get("text", "あなたは優秀なデータサイエンティストです。データ分析やグラフ作成が必要な場合は、Pythonコードを生成してください。システムが自動で実行します。"), height=200)
         if st.button("チャットを開始", type="primary"):
             st.session_state['messages'] = [{"role": "system", "content": role}]
             st.session_state['system_role_defined'] = True
             st.rerun()
         st.stop()
 
-    # Chat History
     for msg in st.session_state['messages']:
         if msg["role"] != "system":
             with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+                st.markdown(msg["content"], unsafe_allow_html=True)
                 if "grounding_metadata" in msg and msg["grounding_metadata"]:
                     with st.expander("🔎 検索ソース (Grounding)"):
                         st.json(msg["grounding_metadata"])
@@ -151,13 +141,12 @@ def run_chatbot_app():
                     u = msg["usage"]
                     st.caption(f"Tokens: In {u['input_tokens']:,} / Out {u['output_tokens']:,}")
 
-    # Input Area
     if prompt := st.chat_input("指示を入力...", disabled=st.session_state.get('is_generating', False)):
         st.session_state['messages'].append({"role": "user", "content": prompt})
         st.session_state['is_generating'] = True
         st.rerun()
 
-    # Generation Logic
+    # --- Generation Logic ---
     if st.session_state['is_generating']:
         with st.chat_message("assistant"):
             thought_area = st.empty()
@@ -180,9 +169,13 @@ def run_chatbot_app():
                 if m["role"] == "system": sys_inst = m["content"]
                 else: contents.append(types.Content(role=m["role"], parts=[types.Part.from_text(text=m["content"])]))
 
+            # --- ★追加: データ分析モードON時のシステムプロンプト動的追加 ---
+            if st.session_state.get('auto_plot_enabled', False) and not is_special:
+                sys_inst += "\n\n【システム設定】現在「データ分析モード(Python自動実行)」がONです。ユーザーの要求に応じて、データ分析やグラフ作成が必要な場合はPythonコードを生成してください。コードは必ず ```python と ``` で囲んでください。アップロードされたファイルへのパスは辞書 `files` から `files['ファイル名']` で取得可能です。"
+
+            # アップロードキューの処理
+            combined_queue = st.session_state.get('uploaded_file_queue', []) + st.session_state.get('clipboard_queue', [])
             if not is_special:
-                # ★修正: 通常のファイルアップロードキューとクリップボードキューを結合してGeminiに渡す
-                combined_queue = st.session_state.get('uploaded_file_queue', []) + st.session_state.get('clipboard_queue', [])
                 if combined_queue:
                     parts, _ = utils.process_uploaded_files_for_gemini(combined_queue)
                     if parts and contents: contents[-1].parts = parts + contents[-1].parts
@@ -235,6 +228,56 @@ def run_chatbot_app():
                 if not full_thought: thought_area.empty()
                 else: thought_status.update(label="Thinking Complete", state="complete")
 
+                # --- ★追加: AIが生成したコードの自律実行 (チェックON時のみ) ---
+                if st.session_state.get('auto_plot_enabled', False):
+                    code_blocks = re.findall(r'```python\n(.*?)```', full_res, re.DOTALL)
+                    
+                    if code_blocks:
+                        st.info("💡 Pythonコードを検知しました。自律実行を開始します...")
+                        code_to_run = code_blocks[-1] # 最後に生成されたコードを実行
+                        
+                        tmp_files = []
+                        file_paths_dict = {}
+                        
+                        try:
+                            # 1. アップロードされたファイルを /tmp に書き出し
+                            for vf in combined_queue:
+                                ext = os.path.splitext(vf.name)[1]
+                                fd, path = tempfile.mkstemp(suffix=ext)
+                                with os.fdopen(fd, 'wb') as f:
+                                    f.write(vf.getvalue())
+                                file_paths_dict[vf.name] = path
+                                tmp_files.append(path)
+                            
+                            # 2. コード実行エンジン呼び出し
+                            with st.spinner("Pythonコードを実行中..."):
+                                stdout_str, figures = execution_engine.execute_user_code(
+                                    code=code_to_run, 
+                                    file_paths=file_paths_dict, 
+                                    canvases=st.session_state.get('python_canvases', [])
+                                )
+                            
+                            # 3. 実行結果の構築
+                            exec_res_md = f"**▶️ システム実行結果:**\n```text\n{stdout_str.strip() or 'No text output'}\n```"
+                            
+                            for fig_buf in figures:
+                                b64_str = base64.b64encode(fig_buf.getvalue()).decode()
+                                exec_res_md += f"\n\n<img src='data:image/png;base64,{b64_str}' width='600'>"
+                            
+                            st.markdown(exec_res_md, unsafe_allow_html=True)
+                            full_res += f"\n\n---\n{exec_res_md}"
+                            
+                        except Exception as e:
+                            err_msg = f"**▶️ システム実行エラー:**\n```text\n{e}\n```"
+                            st.error(err_msg)
+                            full_res += f"\n\n---\n{err_msg}"
+                        finally:
+                            # 4. /tmp の一時ファイルを確実にお掃除
+                            for path in tmp_files:
+                                try: os.remove(path)
+                                except: pass
+
+                # メタデータと最終結果の保存
                 final_grounding = {}
                 if grounding_chunks:
                     last = grounding_chunks[-1]
@@ -244,9 +287,7 @@ def run_chatbot_app():
                     if last.web_search_queries: final_grounding["queries"] = last.web_search_queries
 
                 u_dict = {"total_tokens": usage_meta.total_token_count, "input_tokens": usage_meta.prompt_token_count, "output_tokens": usage_meta.candidates_token_count} if usage_meta else None
-                if u_dict:
-                    st.session_state['total_usage']['total_tokens'] += u_dict['total_tokens']
-
+                
                 as_msg = {"role": "assistant", "content": full_res}
                 if u_dict: as_msg["usage"] = u_dict
                 if final_grounding: as_msg["grounding_metadata"] = final_grounding
@@ -263,28 +304,19 @@ def run_chatbot_app():
             finally:
                 st.session_state['is_generating'] = False
 
-        # --- 1回目の発言でタイトル自動生成＆Firestore保存 ---
+        # --- タイトル自動生成＆Firestore保存 ---
         user_msgs = [m['content'] for m in st.session_state['messages'] if m["role"] == "user"]
 
-        # user_msgsが1以上になったらタイトルを生成する
         if len(user_msgs) >= 1 and not st.session_state.get('chat_title'):
             try:
-                # 1つの発言だけで要約させるようにプロンプトを変更
                 title_prompt = f"以下のユーザー発言を要約し、チャットのファイル名となるタイトルを20文字以内で生成してください。結果の文字列のみ出力し、改行や記号は含めないでください。\n{user_msgs[0]}"
-
-                title_res = client.models.generate_content(
-                    model=model_id,
-                    contents=title_prompt
-                )
+                title_res = client.models.generate_content(model=model_id, contents=title_prompt)
                 date_str = datetime.now().strftime("%y%m%d")
                 clean_title = title_res.text.strip().replace("/", "_").replace("\\", "_")
                 st.session_state['chat_title'] = f"{date_str}_{clean_title}.json"
-                add_debug_log(f"Title generated: {clean_title}")
             except Exception as e:
-                add_debug_log(f"Title Generation Error: {e}", "error")
                 st.session_state['chat_title'] = f"{datetime.now().strftime('%y%m%d')}_新規チャット.json"
 
-        # Firestoreへ履歴を同期保存 (chat_titleが生成されていれば実行される)
         if st.session_state.get('chat_title'):
             firestore_utils.save_chat_to_firestore(
                 uid=user_uid,

@@ -175,6 +175,7 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         # ペーストボタンの配置
         paste_result = paste_image_button(
             label="📋 クリップボード画像を追加",
+            text_color="#000000",  # ← この行を追加して文字色を黒に指定
             background_color="#f0f2f6",
             hover_background_color="#e0e2e6",
             errors="ignore"
@@ -219,6 +220,25 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
             st.caption("ファイルは選択されていません")
 
         st.divider()
+        
+        # --- 追加機能: グラフ描画・データ分析モード ---
+        st.subheader("分析・実行オプション")
+        if 'auto_plot_enabled' not in st.session_state:
+            st.session_state['auto_plot_enabled'] = False
+
+        c_key = st.session_state.get('canvas_key_counter', 0)
+        sel_plot = st.checkbox(
+            label="📈 グラフ描画・データ分析 (Python自動実行)", 
+            value=st.session_state.get('auto_plot_enabled', False),
+            help="ONにすると、AIが生成したPythonコードをサーバー上で実行し、結果をチャットに返します。\nアップロードファイルは `files['ファイル名']` でアクセス可能です。",
+            key=f"plot_chk_{c_key}" 
+        )
+        if sel_plot != st.session_state.get('auto_plot_enabled'):
+            st.session_state['auto_plot_enabled'] = sel_plot
+            st.rerun()
+
+        st.divider()
+
         st.subheader(config.UITexts.EDITOR_SUBHEADER)
         multi_code_enabled = st.checkbox(config.UITexts.MULTI_CODE_CHECKBOX, value=st.session_state.get('multi_code_enabled', False))
         if multi_code_enabled != st.session_state.get('multi_code_enabled', False):
