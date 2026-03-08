@@ -2,7 +2,11 @@ import streamlit as st
 import os
 import json
 import time
+import io
+import datetime
+import hashlib
 from streamlit_ace import st_ace
+from streamlit_paste_button import paste_image_button
 from . import config
 from . import firestore_utils
 
@@ -23,7 +27,7 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         st.checkbox(config.UITexts.WEB_SEARCH_LABEL, key='enable_google_search')
         st.divider()
 
-        # --- 修正: コールバック関数を使用してリセット処理を行う ---
+        # --- コールバック関数を使用してリセット処理を行う ---
         def reset_conversation():
             # 1. パスワードと認証状態を一時退避
             saved_pass = st.session_state.get('encryption_password', "")
@@ -65,7 +69,6 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
 
         st.text_input(
             "暗号化キー (初回入力で固定されます)", 
-            # value=st.session_state['encryption_password'], 
             type="password", 
             key="enc_pass_input",
             on_change=on_password_change
@@ -108,7 +111,7 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
                         if "messages" in loaded_data:
                             st.session_state['messages'] = loaded_data["messages"]
                             st.session_state['chat_title'] = raw_data.get("display_title", selected_title)
-                            # ★修正: 履歴読み込み時は、システムロール設定画面をスキップする
+                            # 履歴読み込み時は、システムロール設定画面をスキップする
                             st.session_state['system_role_defined'] = True
                             st.success("履歴を復元しました！")
                             st.rerun()
@@ -148,10 +151,72 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         st.divider()
         
         st.header("ファイルを添付")
+        
+        # キューの初期化
         if "uploaded_file_queue" not in st.session_state: st.session_state["uploaded_file_queue"] = []
+        if "clipboard_queue" not in st.session_state: st.session_state["clipboard_queue"] = []
+
         uf = st.file_uploader("アップロード", type=["png","pdf","docx","pptx","py","txt","bat"], accept_multiple_files=True, key="main_up")
         if uf: st.session_state["uploaded_file_queue"] = uf
         else: st.session_state["uploaded_file_queue"] = []
+
+        # --- クリップボードからの画像ペースト機能 ---
+        
+        # Gemini APIへ渡すため、Streamlit標準のUploadedFileオブジェクトの振る舞いを模倣するクラス
+        class VirtualUploadedFile:
+            def __init__(self, data_bytes, name, mime_type):
+                self._data = data_bytes
+                self.name = name
+                self.type = mime_type
+            
+            def getvalue(self):
+                return self._data
+
+        # ペーストボタンの配置
+        paste_result = paste_image_button(
+            label="📋 クリップボード画像を追加",
+            background_color="#f0f2f6",
+            hover_background_color="#e0e2e6",
+            errors="ignore"
+        )
+
+        # 画像がペースト（取得）された場合の処理
+        if paste_result.image_data is not None:
+            buf = io.BytesIO()
+            paste_result.image_data.save(buf, format='PNG')
+            byte_data = buf.getvalue()
+            
+            # コンポーネント再レンダリング時の「無限追加バグ」を防ぐためのハッシュチェック
+            img_hash = hashlib.md5(byte_data).hexdigest()
+            if st.session_state.get('last_pasted_hash') != img_hash:
+                st.session_state['last_pasted_hash'] = img_hash
+                timestamp = datetime.datetime.now().strftime("%H%M%S")
+                filename = f"clipboard_{timestamp}.png"
+                
+                virtual_file = VirtualUploadedFile(byte_data, filename, "image/png")
+                st.session_state['clipboard_queue'].append(virtual_file)
+                st.toast(f"画像を追加しました: {filename}", icon="✅")
+
+        # --- 送信待ちファイルの表示部分 ---
+        total_files = len(st.session_state['uploaded_file_queue']) + len(st.session_state['clipboard_queue'])
+        
+        if total_files > 0:
+            st.markdown(f"**送信待ち: {total_files} 件**")
+            
+            if st.session_state['clipboard_queue']:
+                st.caption("クリップボード取得分:")
+                for i, vfile in enumerate(st.session_state['clipboard_queue']):
+                    col_del, col_name = st.columns([1, 5])
+                    with col_del:
+                        if st.button("❌", key=f"del_clip_{i}"):
+                            st.session_state['clipboard_queue'].pop(i)
+                            # 削除時はハッシュもリセット（直後にもう一度同じ画像を貼れるようにするため）
+                            st.session_state['last_pasted_hash'] = None
+                            st.rerun()
+                    with col_name:
+                        st.text(vfile.name)
+        else:
+            st.caption("ファイルは選択されていません")
 
         st.divider()
         st.subheader(config.UITexts.EDITOR_SUBHEADER)

@@ -181,8 +181,10 @@ def run_chatbot_app():
                 else: contents.append(types.Content(role=m["role"], parts=[types.Part.from_text(text=m["content"])]))
 
             if not is_special:
-                if st.session_state.get('uploaded_file_queue'):
-                    parts, _ = utils.process_uploaded_files_for_gemini(st.session_state['uploaded_file_queue'])
+                # ★修正: 通常のファイルアップロードキューとクリップボードキューを結合してGeminiに渡す
+                combined_queue = st.session_state.get('uploaded_file_queue', []) + st.session_state.get('clipboard_queue', [])
+                if combined_queue:
+                    parts, _ = utils.process_uploaded_files_for_gemini(combined_queue)
                     if parts and contents: contents[-1].parts = parts + contents[-1].parts
 
                 c_parts = []
@@ -261,7 +263,7 @@ def run_chatbot_app():
             finally:
                 st.session_state['is_generating'] = False
 
-        # --- ★修正: 1回目の発言でタイトル自動生成＆Firestore保存 ---
+        # --- 1回目の発言でタイトル自動生成＆Firestore保存 ---
         user_msgs = [m['content'] for m in st.session_state['messages'] if m["role"] == "user"]
 
         # user_msgsが1以上になったらタイトルを生成する

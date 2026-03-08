@@ -28,7 +28,7 @@ dependencies = [
     "httpx==0.28.1",
     "websockets==15.0.1",
     "cryptography",
-    "google-cloud-firestore"    
+    "google-cloud-firestore",    
     "streamlit-paste-button"
 ]
 
