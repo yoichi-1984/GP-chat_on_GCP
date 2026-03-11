@@ -1,3 +1,4 @@
+# main.py:
 import os
 import json
 import sys
@@ -34,16 +35,29 @@ def add_debug_log(message, level="info"):
         st.session_state["debug_logs"].pop(0)
 
 def load_history(uploader_key):
+    """
+    ローカルのJSONファイルから履歴を復元する（セッションリフレッシュ設計適用）
+    """
     uploaded_file = st.session_state.get(uploader_key)
     if not uploaded_file: return
     try:
         loaded_data = json.load(uploaded_file)
         if isinstance(loaded_data, dict) and "messages" in loaded_data:
+            # 1. 【上書き】JSONデータから復元するもの
             st.session_state['messages'] = loaded_data["messages"]
             if "python_canvases" in loaded_data:
                 st.session_state['python_canvases'] = loaded_data["python_canvases"]
             if "multi_code_enabled" in loaded_data:
                 st.session_state['multi_code_enabled'] = loaded_data["multi_code_enabled"]
+            
+            # 2. 【破棄】安全のためクリーンアップするもの
+            st.session_state['uploaded_file_queue'] = []
+            st.session_state['clipboard_queue'] = []
+            st.session_state['debug_logs'] = []
+            st.session_state['is_generating'] = False
+            
+            # 3. 【維持】モデル設定などは意図的に操作せずそのままキープする
+            
             st.success(config.UITexts.HISTORY_LOADED_SUCCESS)
             st.session_state['system_role_defined'] = True
             st.session_state['canvas_key_counter'] += 1
@@ -169,7 +183,7 @@ def run_chatbot_app():
                 if m["role"] == "system": sys_inst = m["content"]
                 else: contents.append(types.Content(role=m["role"], parts=[types.Part.from_text(text=m["content"])]))
 
-            # --- ★追加: データ分析モードON時のシステムプロンプト動的追加 ---
+            # --- データ分析モードON時のシステムプロンプト動的追加 ---
             if st.session_state.get('auto_plot_enabled', False) and not is_special:
                 sys_inst += "\n\n【システム設定】現在「データ分析モード(Python自動実行)」がONです。ユーザーの要求に応じて、データ分析やグラフ作成が必要な場合はPythonコードを生成してください。コードは必ず ```python と ``` で囲んでください。アップロードされたファイルへのパスは辞書 `files` から `files['ファイル名']` で取得可能です。"
 
@@ -228,13 +242,13 @@ def run_chatbot_app():
                 if not full_thought: thought_area.empty()
                 else: thought_status.update(label="Thinking Complete", state="complete")
 
-                # --- ★追加: AIが生成したコードの自律実行 (チェックON時のみ) ---
+                # --- AIが生成したコードの自律実行 ---
                 if st.session_state.get('auto_plot_enabled', False):
                     code_blocks = re.findall(r'```python\n(.*?)```', full_res, re.DOTALL)
                     
                     if code_blocks:
                         st.info("💡 Pythonコードを検知しました。自律実行を開始します...")
-                        code_to_run = code_blocks[-1] # 最後に生成されたコードを実行
+                        code_to_run = code_blocks[-1]
                         
                         tmp_files = []
                         file_paths_dict = {}
@@ -303,8 +317,14 @@ def run_chatbot_app():
                 st.error(f"Generation Error: {e}")
             finally:
                 st.session_state['is_generating'] = False
+                # --- Point 1: 送信後の不要なキューをクリア (無限増殖・トークン枯渇対策) ---
+                if not is_special:
+                    st.session_state['uploaded_file_queue'] = []
+                    st.session_state['clipboard_queue'] = []
+                    # ウィジェット側のリセットトリガーとしてフラグを立てる（sidebar.pyで処理）
+                    st.session_state['clear_uploader'] = True
 
-        # --- タイトル自動生成＆Firestore保存 ---
+        # --- タイトル自動生成＆Firestore+Storage保存 ---
         user_msgs = [m['content'] for m in st.session_state['messages'] if m["role"] == "user"]
 
         if len(user_msgs) >= 1 and not st.session_state.get('chat_title'):
@@ -313,18 +333,30 @@ def run_chatbot_app():
                 title_res = client.models.generate_content(model=model_id, contents=title_prompt)
                 date_str = datetime.now().strftime("%y%m%d")
                 clean_title = title_res.text.strip().replace("/", "_").replace("\\", "_")
-                st.session_state['chat_title'] = f"{date_str}_{clean_title}.json"
+                st.session_state['chat_title'] = f"{date_str}_{clean_title}"
             except Exception as e:
-                st.session_state['chat_title'] = f"{datetime.now().strftime('%y%m%d')}_新規チャット.json"
+                st.session_state['chat_title'] = f"{datetime.now().strftime('%y%m%d')}_新規チャット"
 
         if st.session_state.get('chat_title'):
-            firestore_utils.save_chat_to_firestore(
-                uid=user_uid,
-                chat_title=st.session_state['chat_title'],
-                messages=st.session_state['messages'],
-                is_encrypted=st.session_state.get('use_encryption', False),
-                password=st.session_state.get('encryption_password', "")
-            )
+            # Point 5: 実データ(JSON)の構築
+            chat_data = {
+                "messages": st.session_state['messages'],
+                "python_canvases": st.session_state.get('python_canvases', []),
+                "multi_code_enabled": st.session_state.get('multi_code_enabled', False)
+            }
+            
+            try:
+                firestore_utils.save_chat_to_firestore(
+                    uid=user_uid,
+                    chat_title=st.session_state['chat_title'],
+                    chat_data=chat_data,
+                    is_encrypted=st.session_state.get('use_encryption', False),
+                    password=st.session_state.get('encryption_password', "")
+                )
+            except Exception as e:
+                # 画面右下にエラー原因をポップアップ表示する
+                st.toast(f"⚠️ 履歴のクラウド保存に失敗しました: {e}", icon="❌")
+                add_debug_log(f"Cloud Save Error: {e}", "error")
         
         st.rerun()
 

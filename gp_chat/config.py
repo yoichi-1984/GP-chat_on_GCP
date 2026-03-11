@@ -1,4 +1,4 @@
-# gp_chat/config.py:
+# config.py:
 MAX_CANVASES = 20
 GCP_PROJECT_ID_NAME = "GCP_PROJECT_ID"
 GCP_LOCATION_NAME = "GCP_LOCATION"

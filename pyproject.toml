@@ -32,7 +32,8 @@ dependencies = [
     "streamlit-paste-button",
     "pandas",
     "numpy",
-    "matplotlib"
+    "matplotlib",
+    "google-cloud-storage"
 ]
 
 [project.scripts]

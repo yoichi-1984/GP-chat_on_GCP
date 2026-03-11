@@ -37,7 +37,7 @@ def load_prompts():
         print(f"Warning: prompts.yaml load failed: {e}")
         return {}
 
-def find_env_files(directory="env"):
+def find_env_files(directory="env2"):
     """ディレクトリ内の.envファイルを検索"""
     if not os.path.isdir(directory):
         return []

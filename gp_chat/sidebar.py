@@ -1,3 +1,4 @@
+# sidebar.py:
 import streamlit as st
 import os
 import json
@@ -43,6 +44,9 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
             st.session_state['encryption_password'] = saved_pass
             st.session_state['is_password_valid'] = saved_valid
             st.session_state['enc_pass_input'] = saved_input
+            
+            # アップローダーのリセットトリガー
+            st.session_state['clear_uploader'] = True
 
         st.button("会話をリセット", on_click=reset_conversation)
 
@@ -85,7 +89,7 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         # 認証成功時のみ暗号化ONとする
         st.session_state['use_encryption'] = st.session_state['is_password_valid']
 
-        # --- 過去のチャット履歴 ---
+        # --- 過去のチャット履歴 (Cloud Storage連動版) ---
         st.subheader("過去のチャット履歴")
         if user_uid != "unknown":
             # 正しいパスワードが入力されている時のみ復号用キーを渡す
@@ -98,25 +102,49 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
                 
                 if selected_title != "--- 選択してください ---" and st.button("クラウドから履歴を復元"):
                     raw_data = hist_titles[selected_title]["raw_data"]
-                    chat_json_str = raw_data.get("chat_data", "{}")
+                    storage_path = raw_data.get("storage_path")
+                    is_encrypted = raw_data.get("is_encrypted", False)
                     
-                    if raw_data.get("is_encrypted"):
-                        if not st.session_state['is_password_valid']:
-                            st.error("暗号化されています。正しい暗号化キーを入力してください。")
-                            st.stop()
-                        chat_json_str = firestore_utils.decrypt_text(chat_json_str, st.session_state['encryption_password'])
+                    if not storage_path:
+                        st.error("旧フォーマットの履歴です。Storageパスが見つかりません。")
+                        st.stop()
                     
+                    if is_encrypted and not st.session_state['is_password_valid']:
+                        st.error("暗号化されています。正しい暗号化キーを入力してください。")
+                        st.stop()
+                        
                     try:
-                        loaded_data = json.loads(chat_json_str)
+                        with st.spinner("クラウドからデータをダウンロード中..."):
+                            loaded_data = firestore_utils.load_chat_from_cloud(
+                                storage_path=storage_path, 
+                                is_encrypted=is_encrypted, 
+                                password=st.session_state['encryption_password']
+                            )
+                            
+                        # JSONからのセッションリフレッシュ設計
                         if "messages" in loaded_data:
+                            # 1. 【上書き】
                             st.session_state['messages'] = loaded_data["messages"]
                             st.session_state['chat_title'] = raw_data.get("display_title", selected_title)
-                            # 履歴読み込み時は、システムロール設定画面をスキップする
+                            if "python_canvases" in loaded_data:
+                                st.session_state['python_canvases'] = loaded_data["python_canvases"]
+                            if "multi_code_enabled" in loaded_data:
+                                st.session_state['multi_code_enabled'] = loaded_data["multi_code_enabled"]
+                            
+                            # 2. 【破棄】
+                            st.session_state['uploaded_file_queue'] = []
+                            st.session_state['clipboard_queue'] = []
+                            st.session_state['debug_logs'] = []
+                            st.session_state['is_generating'] = False
+                            st.session_state['clear_uploader'] = True
+                            
+                            # 3. 【維持】モデル設定などは意図的に操作せずそのままキープする
+                            
                             st.session_state['system_role_defined'] = True
                             st.success("履歴を復元しました！")
                             st.rerun()
-                    except json.JSONDecodeError:
-                        st.error("復号に失敗しました。データが破損しています。")
+                    except Exception as e:
+                        st.error(f"復元に失敗しました: {e}")
             else:
                 st.caption("保存された履歴はありません。")
         else:
@@ -127,14 +155,12 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         # --- History (ローカル用ダウンロード/アップロード) ---
         st.subheader("ローカル保存・復元")
         
-        # ダウンロード用のJSON文字列を作成
         download_data = json.dumps({
             "messages": st.session_state.get('messages', []),
             "python_canvases": st.session_state.get('python_canvases', []),
             "multi_code_enabled": st.session_state.get('multi_code_enabled', False)
         }, ensure_ascii=False, indent=2)
         
-        # ダウンロードファイル名（chat_titleがあればそれを使用、なければ日付ベース）
         dl_filename = st.session_state.get('chat_title') or f"chat_history_{time.strftime('%y%m%d_%H%M%S')}.json"
         if not dl_filename.endswith('.json'):
             dl_filename += '.json'
@@ -152,17 +178,26 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         
         st.header("ファイルを添付")
         
-        # キューの初期化
+        # キューとアップローダーリセット用の初期化
         if "uploaded_file_queue" not in st.session_state: st.session_state["uploaded_file_queue"] = []
         if "clipboard_queue" not in st.session_state: st.session_state["clipboard_queue"] = []
+        if "uploader_key_counter" not in st.session_state: st.session_state["uploader_key_counter"] = 0
+        
+        # main.py等からフラグが渡されたらカウンターを更新してキーを変更(リセット)する
+        if st.session_state.get('clear_uploader', False):
+            st.session_state["uploader_key_counter"] += 1
+            st.session_state['clear_uploader'] = False
 
-        uf = st.file_uploader("アップロード", type=["png","pdf","docx","pptx","py","txt","bat"], accept_multiple_files=True, key="main_up")
-        if uf: st.session_state["uploaded_file_queue"] = uf
-        else: st.session_state["uploaded_file_queue"] = []
+        # 動的なキーを持たせることで強制的に空状態のコンポーネントを再描画する
+        up_key = f"main_up_{st.session_state['uploader_key_counter']}"
+        uf = st.file_uploader("アップロード", type=["png","pdf","docx","pptx","py","txt","bat"], accept_multiple_files=True, key=up_key)
+        
+        if uf: 
+            st.session_state["uploaded_file_queue"] = uf
+        else: 
+            st.session_state["uploaded_file_queue"] = []
 
         # --- クリップボードからの画像ペースト機能 ---
-        
-        # Gemini APIへ渡すため、Streamlit標準のUploadedFileオブジェクトの振る舞いを模倣するクラス
         class VirtualUploadedFile:
             def __init__(self, data_bytes, name, mime_type):
                 self._data = data_bytes
@@ -172,22 +207,19 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
             def getvalue(self):
                 return self._data
 
-        # ペーストボタンの配置
         paste_result = paste_image_button(
             label="📋 クリップボード画像を追加",
-            text_color="#000000",  # ← この行を追加して文字色を黒に指定
+            text_color="#000000",
             background_color="#f0f2f6",
             hover_background_color="#e0e2e6",
             errors="ignore"
         )
 
-        # 画像がペースト（取得）された場合の処理
         if paste_result.image_data is not None:
             buf = io.BytesIO()
             paste_result.image_data.save(buf, format='PNG')
             byte_data = buf.getvalue()
             
-            # コンポーネント再レンダリング時の「無限追加バグ」を防ぐためのハッシュチェック
             img_hash = hashlib.md5(byte_data).hexdigest()
             if st.session_state.get('last_pasted_hash') != img_hash:
                 st.session_state['last_pasted_hash'] = img_hash
@@ -209,9 +241,8 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
                 for i, vfile in enumerate(st.session_state['clipboard_queue']):
                     col_del, col_name = st.columns([1, 5])
                     with col_del:
-                        if st.button("❌", key=f"del_clip_{i}"):
+                        if st.button("❌", key=f"del_clip_{i}_{st.session_state['uploader_key_counter']}"):
                             st.session_state['clipboard_queue'].pop(i)
-                            # 削除時はハッシュもリセット（直後にもう一度同じ画像を貼れるようにするため）
                             st.session_state['last_pasted_hash'] = None
                             st.rerun()
                     with col_name:
@@ -223,27 +254,20 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         
         # --- 追加機能: グラフ描画・データ分析モード ---
         st.subheader("分析・実行オプション")
-        if 'auto_plot_enabled' not in st.session_state:
-            st.session_state['auto_plot_enabled'] = False
-
-        c_key = st.session_state.get('canvas_key_counter', 0)
-        sel_plot = st.checkbox(
+        
+        # Widget競合バグの解消: value+rerunを廃止し、keyバインディングのみで状態を直接管理する
+        st.checkbox(
             label="📈 グラフ描画・データ分析 (Python自動実行)", 
-            value=st.session_state.get('auto_plot_enabled', False),
             help="ONにすると、AIが生成したPythonコードをサーバー上で実行し、結果をチャットに返します。\nアップロードファイルは `files['ファイル名']` でアクセス可能です。",
-            key=f"plot_chk_{c_key}" 
+            key="auto_plot_enabled" 
         )
-        if sel_plot != st.session_state.get('auto_plot_enabled'):
-            st.session_state['auto_plot_enabled'] = sel_plot
-            st.rerun()
 
         st.divider()
 
         st.subheader(config.UITexts.EDITOR_SUBHEADER)
-        multi_code_enabled = st.checkbox(config.UITexts.MULTI_CODE_CHECKBOX, value=st.session_state.get('multi_code_enabled', False))
-        if multi_code_enabled != st.session_state.get('multi_code_enabled', False):
-            st.session_state['multi_code_enabled'] = multi_code_enabled
-            st.rerun()
+        
+        # こちらも競合バグの解消: keyバインディングのみとする
+        st.checkbox(config.UITexts.MULTI_CODE_CHECKBOX, key="multi_code_enabled")
 
         canvases = st.session_state['python_canvases']
         if st.session_state.get('multi_code_enabled', False):
@@ -263,8 +287,8 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
                 c2.button("レビュー", key=f"rev_{i}", on_click=handle_review, args=(i, True), use_container_width=True)
                 c3.button("検証", key=f"val_{i}", on_click=handle_validation, args=(i,), use_container_width=True)
 
-                up_key = f"up_{i}_{st.session_state['canvas_key_counter']}"
-                st.file_uploader(f"Load into Canvas-{i+1}", type=supported_types, key=up_key, on_change=handle_file_upload, args=(i, up_key))
+                c_up_key = f"up_{i}_{st.session_state['canvas_key_counter']}"
+                st.file_uploader(f"Load into Canvas-{i+1}", type=supported_types, key=c_up_key, on_change=handle_file_upload, args=(i, c_up_key))
                 st.divider()
         else:
             if len(canvases) > 1:
@@ -281,8 +305,8 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
             c2.button("Review", key="rev_s", on_click=handle_review, args=(0, False), use_container_width=True)
             c3.button("Validate", key="val_s", on_click=handle_validation, args=(0,), use_container_width=True)
             
-            up_key = f"up_s_{st.session_state['canvas_key_counter']}"
-            st.file_uploader("Load into Canvas", type=supported_types, key=up_key, on_change=handle_file_upload, args=(0, up_key))
+            c_up_key = f"up_s_{st.session_state['canvas_key_counter']}"
+            st.file_uploader("Load into Canvas", type=supported_types, key=c_up_key, on_change=handle_file_upload, args=(0, c_up_key))
             
         st.markdown("---")
         st.markdown(
