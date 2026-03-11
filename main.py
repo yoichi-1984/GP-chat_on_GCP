@@ -1,4 +1,3 @@
-# main.py:
 import os
 import json
 import sys
@@ -7,6 +6,7 @@ import traceback
 import re
 import tempfile
 import base64
+import copy  # ★追加: セッション汚染対策のためディープコピーを利用
 from datetime import datetime
 
 import streamlit as st
@@ -36,27 +36,24 @@ def add_debug_log(message, level="info"):
 
 def load_history(uploader_key):
     """
-    ローカルのJSONファイルから履歴を復元する（セッションリフレッシュ設計適用）
+    ローカルのJSONファイルから履歴を復元する
     """
     uploaded_file = st.session_state.get(uploader_key)
     if not uploaded_file: return
     try:
         loaded_data = json.load(uploaded_file)
         if isinstance(loaded_data, dict) and "messages" in loaded_data:
-            # 1. 【上書き】JSONデータから復元するもの
-            st.session_state['messages'] = loaded_data["messages"]
-            if "python_canvases" in loaded_data:
-                st.session_state['python_canvases'] = loaded_data["python_canvases"]
-            if "multi_code_enabled" in loaded_data:
-                st.session_state['multi_code_enabled'] = loaded_data["multi_code_enabled"]
+            # 1. 【上書き】SNAPSHOT_KEYS に基づき、保存された全設定を復元
+            for key in config.SNAPSHOT_KEYS:
+                if key in loaded_data:
+                    st.session_state[key] = copy.deepcopy(loaded_data[key])
             
-            # 2. 【破棄】安全のためクリーンアップするもの
+            # 2. 【破棄】安全のためクリーンアップするもの（一時的な状態）
             st.session_state['uploaded_file_queue'] = []
             st.session_state['clipboard_queue'] = []
             st.session_state['debug_logs'] = []
             st.session_state['is_generating'] = False
-            
-            # 3. 【維持】モデル設定などは意図的に操作せずそのままキープする
+            st.session_state['clear_uploader'] = True # UIウィジェットのリセットトリガー
             
             st.success(config.UITexts.HISTORY_LOADED_SUCCESS)
             st.session_state['system_role_defined'] = True
@@ -98,18 +95,20 @@ def run_chatbot_app():
         st.error("設定エラー: .env ファイルが見つからず、環境変数も設定されていません。")
         st.stop()
 
+    # ★修正: 参照渡しによるセッション汚染を防ぐため deepcopy を使用
     for key, value in config.SESSION_STATE_DEFAULTS.items():
         if key not in st.session_state:
-            st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
+            st.session_state[key] = copy.deepcopy(value)
 
-    if "chat_title" not in st.session_state: 
-        st.session_state["chat_title"] = None
+    # ★追加: クリアボタン用の専用関数（値の初期化とキーの更新を同時に行う）
+    def handle_clear_canvas(index):
+        st.session_state['python_canvases'][index] = config.ACE_EDITOR_DEFAULT_CODE
+        st.session_state['canvas_key_counter'] += 1
 
+    # ★修正: 不要になったレビューと検証の引数を削除し、クリア用の関数を渡す
     sidebar.render_sidebar(
         supported_extensions, env_files, load_history, 
-        lambda i: st.session_state['python_canvases'].__setitem__(i, config.ACE_EDITOR_DEFAULT_CODE),
-        lambda i, m: (st.session_state['messages'].append({"role": "user", "content": config.UITexts.REVIEW_PROMPT_MULTI.format(i=i+1) if m else config.UITexts.REVIEW_PROMPT_SINGLE}), st.session_state.__setitem__('is_generating', True)),
-        lambda i: utils.run_pylint_validation(st.session_state['python_canvases'][i], i, PROMPTS),
+        handle_clear_canvas,
         lambda i, k: st.session_state['python_canvases'].__setitem__(i, st.session_state[k].getvalue().decode("utf-8")) if st.session_state.get(k) else None,
         user_uid=user_uid
     )
@@ -317,19 +316,31 @@ def run_chatbot_app():
                 st.error(f"Generation Error: {e}")
             finally:
                 st.session_state['is_generating'] = False
-                # --- Point 1: 送信後の不要なキューをクリア (無限増殖・トークン枯渇対策) ---
+                # --- Point 1: 送信後の不要なキューをクリア ---
                 if not is_special:
                     st.session_state['uploaded_file_queue'] = []
                     st.session_state['clipboard_queue'] = []
-                    # ウィジェット側のリセットトリガーとしてフラグを立てる（sidebar.pyで処理）
+                    # ウィジェット側のリセットトリガーとしてフラグを立てる
                     st.session_state['clear_uploader'] = True
 
         # --- タイトル自動生成＆Firestore+Storage保存 ---
         user_msgs = [m['content'] for m in st.session_state['messages'] if m["role"] == "user"]
 
-        if len(user_msgs) >= 1 and not st.session_state.get('chat_title'):
+        # ★修正: 2往復目(ユーザー発言が2回以上)でタイトル生成を行うように条件を変更
+        if len(user_msgs) >= 2 and not st.session_state.get('chat_title'):
             try:
-                title_prompt = f"以下のユーザー発言を要約し、チャットのファイル名となるタイトルを20文字以内で生成してください。結果の文字列のみ出力し、改行や記号は含めないでください。\n{user_msgs[0]}"
+                # ★追加: これまでのユーザーとAIのやり取りを全て抽出して繋げる
+                history_texts = []
+                for m in st.session_state['messages']:
+                    if m["role"] == "user":
+                        history_texts.append(f"ユーザー: {m['content']}")
+                    elif m["role"] == "assistant":
+                        history_texts.append(f"AI: {m['content']}")
+                
+                chat_history_text = "\n".join(history_texts)
+                
+                # ★修正: 抽出したチャット履歴全体をプロンプトに含めて要約させる
+                title_prompt = f"以下の会話の内容を、20文字程度の** 日本語ベースの **短い要約（タイトル）にしてください。必要なら多少の英語を使ってもOKです。ファイル名として使用するため、記号は含めないでください。\n\n{chat_history_text}"
                 title_res = client.models.generate_content(model=model_id, contents=title_prompt)
                 date_str = datetime.now().strftime("%y%m%d")
                 clean_title = title_res.text.strip().replace("/", "_").replace("\\", "_")
@@ -338,11 +349,11 @@ def run_chatbot_app():
                 st.session_state['chat_title'] = f"{datetime.now().strftime('%y%m%d')}_新規チャット"
 
         if st.session_state.get('chat_title'):
-            # Point 5: 実データ(JSON)の構築
+            # ★修正: SNAPSHOT_KEYS に基づき、設定も全て含めた実データ(JSON)を構築
             chat_data = {
-                "messages": st.session_state['messages'],
-                "python_canvases": st.session_state.get('python_canvases', []),
-                "multi_code_enabled": st.session_state.get('multi_code_enabled', False)
+                key: copy.deepcopy(st.session_state[key])
+                for key in config.SNAPSHOT_KEYS
+                if key in st.session_state
             }
             
             try:
@@ -354,7 +365,6 @@ def run_chatbot_app():
                     password=st.session_state.get('encryption_password', "")
                 )
             except Exception as e:
-                # 画面右下にエラー原因をポップアップ表示する
                 st.toast(f"⚠️ 履歴のクラウド保存に失敗しました: {e}", icon="❌")
                 add_debug_log(f"Cloud Save Error: {e}", "error")
         

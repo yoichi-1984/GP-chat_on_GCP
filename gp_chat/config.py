@@ -9,39 +9,72 @@ ACE_EDITOR_SETTINGS = {
     "theme": "monokai", 
     "font_size": 14, 
     "show_gutter": True, 
-    "wrap": True
+    "wrap": False
 }
 ACE_EDITOR_DEFAULT_CODE = "# Code goes here\n"
 DEFAULT_SYSTEM_ROLE = "You are Gemini, a helpful AI assistant."
 
+# ==============================================================================
+# セッション状態のデフォルト値 (リセット時に完全に初期化される基準)
+# ==============================================================================
 SESSION_STATE_DEFAULTS = {
+    # --- チャット・プロンプト関連 ---
     "messages": [], 
     "system_role_defined": False, 
+    "chat_title": None,
+    
+    # --- UI・機能設定 (スナップショット対象) ---
+    "current_model_id": "gemini-3.1-pro-preview",
+    "reasoning_effort": "high", 
+    "enable_google_search": False, 
+    "auto_plot_enabled": False,  # ★追加: データ分析モードのフラグ
+    "multi_code_enabled": False, 
+    
+    # --- エディタ関連 ---
+    "python_canvases": ["# Code goes here\n"],
+    "canvas_key_counter": 0,
+    
+    # --- システム状態・制御フラグ ---
     "total_usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
     "is_generating": False, 
     "last_usage_info": None, 
-    "python_canvases": ["# Code goes here\n"],
-    "multi_code_enabled": False, 
     "stop_generation": False, 
-    "canvas_key_counter": 0,
-    "reasoning_effort": "high", 
     "debug_logs": [], 
-    "current_model_id": "gemini-3.1-pro-preview",
-    "enable_google_search": False, 
-    "uploaded_file_queue": []
+    
+    # --- ファイルアップロード関連 (リセット対象だがスナップショットには含めない) ---
+    "uploaded_file_queue": [],
+    "clipboard_queue": [],       # ★追加: クリップボードのキュー
+    "uploader_key_counter": 0,   # ★追加: UI強制リセット用カウンター
+    "clear_uploader": False      # ★追加: UIリセットトリガー
 }
+
+# ==============================================================================
+# スナップショット対象キー (クラウド保存・JSONダウンロード時に抽出・復元する項目)
+# ==============================================================================
+# ※ 添付ファイル等の「その場限りの状態」は除外し、チャットのコンテキストと設定のみを定義
+SNAPSHOT_KEYS = [
+    "messages",
+    "system_role_defined",
+    "chat_title",
+    "current_model_id",
+    "reasoning_effort",
+    "enable_google_search",
+    "auto_plot_enabled",
+    "multi_code_enabled",
+    "python_canvases"
+]
 
 AVAILABLE_MODELS = ["gemini-3.1-pro-preview","gemini-3-pro-preview", "gemini-3-flash-preview"]
 
 class UITexts:
-    APP_TITLE = "🤖GP-Chat 汎用AIアプリ with Gemini" # タイトルも汎用的に変更
+    APP_TITLE = "🤖GP-Chat 汎用AIアプリ with Gemini"
     SIDEBAR_HEADER = "設定"
     RESET_BUTTON_LABEL = "会話履歴をリセット"
     CODEX_MINI_INFO = "`Gemini 3 は最大1Mまでのトークンを使用可能です` ."
     HISTORY_SUBHEADER = "会話履歴 (JSON)"
     DOWNLOAD_HISTORY_BUTTON = "会話履歴をダウンロード"
     UPLOAD_HISTORY_LABEL = "JSONで会話を再開"
-    HISTORY_LOADED_SUCCESS = "会話履歴とCanvasを読み込みました"
+    HISTORY_LOADED_SUCCESS = "会話履歴と設定を完全に復元しました" # ★文言を実態に合わせて修正
     OLD_HISTORY_FORMAT_WARNING = "古いフォーマットなので対応していません"
     JSON_FORMAT_ERROR = "対応できないJSON形式です"
     JSON_LOAD_ERROR = "JSON load error: {e}"

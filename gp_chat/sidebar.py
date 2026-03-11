@@ -1,4 +1,3 @@
-# sidebar.py:
 import streamlit as st
 import os
 import json
@@ -6,12 +5,14 @@ import time
 import io
 import datetime
 import hashlib
+import copy  # ★追加: ディープコピー用
 from streamlit_ace import st_ace
 from streamlit_paste_button import paste_image_button
 from . import config
 from . import firestore_utils
 
-def render_sidebar(supported_types, env_files, load_history, handle_clear, handle_review, handle_validation, handle_file_upload, user_uid="unknown"):
+# ★修正: handle_review, handle_validation の引数を削除
+def render_sidebar(supported_types, env_files, load_history, handle_clear, handle_file_upload, user_uid="unknown"):
     with st.sidebar:
         st.header("AIモデル選択")
 
@@ -36,9 +37,9 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
             saved_input = st.session_state.get('enc_pass_input', "")
 
             # 2. 会話の初期化 (デフォルト設定のロード)
+            # ★修正: 参照渡しによる汚染を防ぐため deepcopy を使用
             for k, v in config.SESSION_STATE_DEFAULTS.items(): 
-                st.session_state[k] = v
-            st.session_state['chat_title'] = None
+                st.session_state[k] = copy.deepcopy(v)
 
             # 3. 退避したパスワード状態を復元
             st.session_state['encryption_password'] = saved_pass
@@ -122,14 +123,13 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
                             )
                             
                         # JSONからのセッションリフレッシュ設計
-                        if "messages" in loaded_data:
-                            # 1. 【上書き】
-                            st.session_state['messages'] = loaded_data["messages"]
+                        if isinstance(loaded_data, dict) and "messages" in loaded_data:
+                            # 1. 【上書き】SNAPSHOT_KEYS に基づき、保存された全設定を復元
+                            for key in config.SNAPSHOT_KEYS:
+                                if key in loaded_data:
+                                    st.session_state[key] = copy.deepcopy(loaded_data[key])
+                                    
                             st.session_state['chat_title'] = raw_data.get("display_title", selected_title)
-                            if "python_canvases" in loaded_data:
-                                st.session_state['python_canvases'] = loaded_data["python_canvases"]
-                            if "multi_code_enabled" in loaded_data:
-                                st.session_state['multi_code_enabled'] = loaded_data["multi_code_enabled"]
                             
                             # 2. 【破棄】
                             st.session_state['uploaded_file_queue'] = []
@@ -137,8 +137,6 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
                             st.session_state['debug_logs'] = []
                             st.session_state['is_generating'] = False
                             st.session_state['clear_uploader'] = True
-                            
-                            # 3. 【維持】モデル設定などは意図的に操作せずそのままキープする
                             
                             st.session_state['system_role_defined'] = True
                             st.success("履歴を復元しました！")
@@ -155,11 +153,13 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         # --- History (ローカル用ダウンロード/アップロード) ---
         st.subheader("ローカル保存・復元")
         
-        download_data = json.dumps({
-            "messages": st.session_state.get('messages', []),
-            "python_canvases": st.session_state.get('python_canvases', []),
-            "multi_code_enabled": st.session_state.get('multi_code_enabled', False)
-        }, ensure_ascii=False, indent=2)
+        # ★修正: SNAPSHOT_KEYS に基づき、全設定情報を含めた完全なダウンロードデータを構築
+        download_dict = {
+            key: copy.deepcopy(st.session_state[key])
+            for key in config.SNAPSHOT_KEYS
+            if key in st.session_state
+        }
+        download_data = json.dumps(download_dict, ensure_ascii=False, indent=2)
         
         dl_filename = st.session_state.get('chat_title') or f"chat_history_{time.strftime('%y%m%d_%H%M%S')}.json"
         if not dl_filename.endswith('.json'):
@@ -282,10 +282,8 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
                 if updated != content:
                     canvases[i] = updated
                 
-                c1, c2, c3 = st.columns(3)
-                c1.button("クリア", key=f"clr_{i}", on_click=handle_clear, args=(i,), use_container_width=True)
-                c2.button("レビュー", key=f"rev_{i}", on_click=handle_review, args=(i, True), use_container_width=True)
-                c3.button("検証", key=f"val_{i}", on_click=handle_validation, args=(i,), use_container_width=True)
+                # ★修正: カラム分割とレビュー・検証ボタンを削除し、クリアボタンのみにする
+                st.button(config.UITexts.CLEAR_BUTTON, key=f"clr_{i}", on_click=handle_clear, args=(i,), use_container_width=True)
 
                 c_up_key = f"up_{i}_{st.session_state['canvas_key_counter']}"
                 st.file_uploader(f"Load into Canvas-{i+1}", type=supported_types, key=c_up_key, on_change=handle_file_upload, args=(i, c_up_key))
@@ -300,10 +298,8 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
             if updated != canvases[0]:
                 canvases[0] = updated
 
-            c1, c2, c3 = st.columns(3)
-            c1.button("Clear", key="clr_s", on_click=handle_clear, args=(0,), use_container_width=True)
-            c2.button("Review", key="rev_s", on_click=handle_review, args=(0, False), use_container_width=True)
-            c3.button("Validate", key="val_s", on_click=handle_validation, args=(0,), use_container_width=True)
+            # ★修正: カラム分割とレビュー・検証ボタンを削除し、クリアボタンのみにする
+            st.button(config.UITexts.CLEAR_BUTTON, key="clr_s", on_click=handle_clear, args=(0,), use_container_width=True)
             
             c_up_key = f"up_s_{st.session_state['canvas_key_counter']}"
             st.file_uploader("Load into Canvas", type=supported_types, key=c_up_key, on_change=handle_file_upload, args=(0, c_up_key))
