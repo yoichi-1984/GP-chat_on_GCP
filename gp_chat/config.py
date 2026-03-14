@@ -1,4 +1,3 @@
-# config.py:
 MAX_CANVASES = 20
 GCP_PROJECT_ID_NAME = "GCP_PROJECT_ID"
 GCP_LOCATION_NAME = "GCP_LOCATION"
@@ -22,14 +21,22 @@ SESSION_STATE_DEFAULTS = {
     "messages": [], 
     "system_role_defined": False, 
     "chat_title": None,
+    "special_generation_messages": None,
     
-    # --- UI・機能設定 (スナップショット対象) ---
+    # --- UI・機能設定 (スナップショット対象・ユーザー設定) ---
     "current_model_id": "gemini-3.1-pro-preview",
     "reasoning_effort": "high", 
     "enable_google_search": False, 
-    "auto_plot_enabled": False,  # ★追加: データ分析モードのフラグ
+    "auto_plot_enabled": False,  
     "multi_code_enabled": False, 
+    "selected_env_file": None,
     
+    # --- 暗号化設定 (UI・機能設定) ---
+    "use_encryption": False,
+    "encryption_password": "",
+    "is_password_valid": False,
+    "enc_pass_input": "",
+
     # --- エディタ関連 ---
     "python_canvases": ["# Code goes here\n"],
     "canvas_key_counter": 0,
@@ -41,17 +48,46 @@ SESSION_STATE_DEFAULTS = {
     "stop_generation": False, 
     "debug_logs": [], 
     
-    # --- ファイルアップロード関連 (リセット対象だがスナップショットには含めない) ---
+    # --- ファイルアップロード・UIリセット関連 (UI専用一時状態) ---
     "uploaded_file_queue": [],
-    "clipboard_queue": [],       # ★追加: クリップボードのキュー
-    "uploader_key_counter": 0,   # ★追加: UI強制リセット用カウンター
-    "clear_uploader": False      # ★追加: UIリセットトリガー
+    "clipboard_queue": [],       
+    "uploader_key_counter": 0,   
+    "clear_uploader": False,     
+    "last_pasted_hash": None,         # ★Phase1: 同じ画像を貼り直すための一時ハッシュ
+    "history_ui_key_counter": 0,      # ★Phase1: 履歴SelectboxやUploaderを再生成するためのカウンター
 }
+
+# ==============================================================================
+# ★ Phase 1追加: Stateの責務分離リスト
+# 今後のリセットや復元処理において「保持するもの」「消すもの」を明確に分けるための定義
+# ==============================================================================
+
+# ユーザー設定 (リセット時も保持する)
+PREFERENCE_KEYS = [
+    "current_model_id", "reasoning_effort", "enable_google_search", 
+    "auto_plot_enabled", "selected_env_file", "use_encryption", 
+    "encryption_password", "is_password_valid", "enc_pass_input"
+]
+
+# 会話のデータ本体 (リセット時に消去・初期化する)
+CONVERSATION_KEYS = [
+    "messages", "chat_title", "python_canvases", "system_role_defined", 
+    "special_generation_messages"
+]
+
+# UIの一時状態 (リセット時やロード時に必ず再生成・クリアする)
+UI_EPHEMERAL_KEYS = [
+    "uploader_key_counter", "history_ui_key_counter", "canvas_key_counter",
+    "clear_uploader", "last_pasted_hash", "uploaded_file_queue", 
+    "clipboard_queue", "debug_logs", "is_generating", "total_usage",
+    "last_usage_info", "stop_generation"
+]
 
 # ==============================================================================
 # スナップショット対象キー (クラウド保存・JSONダウンロード時に抽出・復元する項目)
 # ==============================================================================
 # ※ 添付ファイル等の「その場限りの状態」は除外し、チャットのコンテキストと設定のみを定義
+# ※ Phase 1 ではここの変更は行わない
 SNAPSHOT_KEYS = [
     "messages",
     "system_role_defined",
@@ -74,7 +110,7 @@ class UITexts:
     HISTORY_SUBHEADER = "会話履歴 (JSON)"
     DOWNLOAD_HISTORY_BUTTON = "会話履歴をダウンロード"
     UPLOAD_HISTORY_LABEL = "JSONで会話を再開"
-    HISTORY_LOADED_SUCCESS = "会話履歴と設定を完全に復元しました" # ★文言を実態に合わせて修正
+    HISTORY_LOADED_SUCCESS = "会話履歴と設定を完全に復元しました"
     OLD_HISTORY_FORMAT_WARNING = "古いフォーマットなので対応していません"
     JSON_FORMAT_ERROR = "対応できないJSON形式です"
     JSON_LOAD_ERROR = "JSON load error: {e}"
