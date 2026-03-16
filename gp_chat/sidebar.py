@@ -11,6 +11,7 @@ from streamlit_ace import st_ace
 from streamlit_paste_button import paste_image_button
 from . import config
 from . import firestore_utils
+from . import session_state_manager
 
 def render_sidebar(supported_types, env_files, load_history, handle_clear, handle_file_upload, user_uid="unknown"):
     with st.sidebar:
@@ -30,21 +31,7 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         st.divider()
 
         def reset_conversation():
-            st.session_state['messages'] = []
-            st.session_state['chat_title'] = None
-            st.session_state['system_role_defined'] = False
-
-            st.session_state['python_canvases'] = [config.ACE_EDITOR_DEFAULT_CODE]
-            st.session_state['canvas_key_counter'] += 1
-
-            st.session_state['uploaded_file_queue'] = []
-            st.session_state['clipboard_queue'] = []
-            st.session_state['last_pasted_hash'] = None
-            st.session_state['uploader_key_counter'] += 1
-            st.session_state['clear_uploader'] = False 
-
-            st.session_state['is_generating'] = False
-            st.session_state['debug_logs'] = []
+            session_state_manager.reset_conversation_state()
 
         st.button("会話をリセット", on_click=reset_conversation)
 
@@ -93,9 +80,8 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
             is_encrypted = raw_data.get("is_encrypted", False)
 
             if not storage_path:
-                st.session_state['sidebar_msg'] = ("error", "旧フォーマットの履歴です。Storageパスが見つかりません。")
+                st.session_state['sidebar_msg'] = ("error", "旧フォーマットの履歴です。")
                 return
-
             if is_encrypted and not st.session_state['is_password_valid']:
                 st.session_state['sidebar_msg'] = ("error", "暗号化されています。正しい暗号化キーを入力してください。")
                 return
@@ -107,46 +93,27 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
                     password=st.session_state['encryption_password']
                 )
 
-                if isinstance(loaded_data, dict) and "messages" in loaded_data:
-                    # ユーザーの要件通り、全設定を含めてログ情報で上書きする
-                    for key in config.SNAPSHOT_KEYS:
-                        if key in loaded_data:
-                            st.session_state[key] = copy.deepcopy(loaded_data[key])
+                # 新モジュールで復元適用 (※Phase3まで chat_title 上書き処理はモジュール側で吸収されるためここでは行わない)
+                session_state_manager.restore_snapshot(loaded_data)
 
-                    st.session_state['chat_title'] = raw_data.get("display_title", selected_title)
-
-                    # UI状態のクリーンアップと強制再描画のトリガー
-                    st.session_state['uploaded_file_queue'] = []
-                    st.session_state['clipboard_queue'] = []
-                    st.session_state['last_pasted_hash'] = None
-                    st.session_state['debug_logs'] = []
-                    st.session_state['is_generating'] = False
-
-                    st.session_state['uploader_key_counter'] += 1
-                    st.session_state['canvas_key_counter'] += 1
-                    st.session_state['clear_uploader'] = False 
-
-                    st.session_state['system_role_defined'] = True
-                    st.session_state['sidebar_msg'] = ("success", "履歴を復元しました！")
+                st.session_state['pending_restore_notice'] = "クラウドから履歴を復元しました！"
             except Exception as e:
                 st.session_state['sidebar_msg'] = ("error", f"復元に失敗しました: {e}")
 
+        # --- UI動的キーの適用 (Cloud selectbox) ---
         if user_uid != "unknown":
             decryption_pass = st.session_state['encryption_password'] if st.session_state['is_password_valid'] else ""
             histories = firestore_utils.get_history_list(user_uid, decryption_pass)
 
             if histories:
                 hist_titles = {h["title"]: h for h in histories}
-                selected_title = st.selectbox("履歴を選択", ["--- 選択してください ---"] + list(hist_titles.keys()))
+                history_select_key = f"history_select_{st.session_state.get('history_ui_key_counter', 0)}"
 
-                if selected_title != "--- 選択してください ---":
-                    raw_data = hist_titles[selected_title]["raw_data"]
-                    # on_click を使ってウィジェット描画前に状態を更新させる
-                    st.button(
-                        "クラウドから履歴を復元", 
-                        on_click=restore_from_cloud_callback, 
-                        args=(raw_data, selected_title)
-                    )
+                selected_title = st.selectbox(
+                    "履歴を選択", 
+                    ["--- 選択してください ---"] + list(hist_titles.keys()),
+                    key=history_select_key
+                )
             else:
                 st.caption("保存された履歴はありません。")
 
@@ -165,26 +132,25 @@ def render_sidebar(supported_types, env_files, load_history, handle_clear, handl
         # --- History (ローカル用ダウンロード/アップロード) ---
         st.subheader("ローカル保存・復元")
 
-        download_dict = {
-            key: copy.deepcopy(st.session_state[key])
-            for key in config.SNAPSHOT_KEYS
-            if key in st.session_state
-        }
+        download_dict = session_state_manager.build_snapshot_from_session()
         download_data = json.dumps(download_dict, ensure_ascii=False, indent=2)
 
         dl_filename = st.session_state.get('chat_title') or f"chat_history_{time.strftime('%y%m%d_%H%M%S')}.json"
-        if not dl_filename.endswith('.json'):
-            dl_filename += '.json'
+        if not dl_filename.endswith('.json'): dl_filename += '.json'
 
         st.download_button(
             label="現在の会話をJSONでダウンロード",
-            data=download_data,
-            file_name=dl_filename,
-            mime="application/json",
-            use_container_width=True
+            data=download_data, file_name=dl_filename, mime="application/json", use_container_width=True
         )
 
-        st.file_uploader("JSONから会話を再開", type="json", key="hist_up", on_change=load_history, args=("hist_up",))
+        hist_up_key = f"hist_up_{st.session_state.get('history_ui_key_counter', 0)}"
+        st.file_uploader(
+            "JSONから会話を再開", 
+            type="json", 
+            key=hist_up_key, 
+            on_change=load_history, 
+            args=(hist_up_key,)
+        )
         st.divider()
 
         st.header("ファイルを添付")

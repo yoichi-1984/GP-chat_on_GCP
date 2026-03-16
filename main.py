@@ -22,6 +22,7 @@ try:
     from gp_chat import sidebar
     from gp_chat import firestore_utils
     from gp_chat import execution_engine
+    from gp_chat import session_state_manager
 except ImportError as e:
     st.error(f"Critical System Error: Failed to import application modules. {e}")
     st.stop()
@@ -35,48 +36,26 @@ def add_debug_log(message, level="info"):
     if len(st.session_state["debug_logs"]) > 50:
         st.session_state["debug_logs"].pop(0)
 
+# --- load_history の大幅縮小 ---
 def load_history(uploader_key):
-    """
-    ローカルのJSONファイルから履歴を復元する。
-    ファイルアップローダーの on_change コールバックとして実行される。
-    """
+    """ローカルのJSONファイルから履歴を復元する"""
     uploaded_file = st.session_state.get(uploader_key)
     if not uploaded_file: return
     try:
         loaded_data = json.load(uploaded_file)
-        if isinstance(loaded_data, dict) and "messages" in loaded_data:
-            # 1. 【上書き】ユーザーの要件通り、SNAPSHOT_KEYS に基づき保存された全設定を復元
-            for key in config.SNAPSHOT_KEYS:
-                if key in loaded_data:
-                    st.session_state[key] = copy.deepcopy(loaded_data[key])
+        session_state_manager.restore_snapshot(loaded_data)
 
-            # 2. 【破棄】安全のためクリーンアップするもの（一時的な状態）
-            st.session_state['uploaded_file_queue'] = []
-            st.session_state['clipboard_queue'] = []
-            st.session_state['debug_logs'] = []
-            st.session_state['is_generating'] = False
-
-            # UIウィジェットのリセットトリガー
-            st.session_state['clear_uploader'] = True 
-            st.session_state['last_pasted_hash'] = None
-            st.session_state['system_role_defined'] = True
-
-            # 強制再描画用のカウンターを進める
-            st.session_state['canvas_key_counter'] += 1
-            st.session_state['uploader_key_counter'] += 1
-            st.session_state.pop('special_generation_messages', None)
-
-            st.toast(config.UITexts.HISTORY_LOADED_SUCCESS, icon="✅")
-            add_debug_log("Session restored from JSON.")
+        # 即時表示ではなく次回のrerunで確実に表示させる
+        st.session_state['pending_restore_notice'] = config.UITexts.HISTORY_LOADED_SUCCESS
     except Exception as e:
-        st.toast(f"Load failed: {e}", icon="❌")
+        st.error(f"Load failed: {e}")
 
 # --- Streamlit Application ---
 def run_chatbot_app():
     st.set_page_config(page_title=config.UITexts.APP_TITLE, layout="wide")
-    st.title(config.UITexts.APP_TITLE)
 
-    if "debug_logs" not in st.session_state: st.session_state["debug_logs"] = []
+    if 'pending_restore_notice' in st.session_state:
+        st.toast(st.session_state.pop('pending_restore_notice'), icon="✅")
 
     user_uid = "unknown"
     try:
@@ -346,13 +325,8 @@ def run_chatbot_app():
                 st.session_state['chat_title'] = f"{datetime.now().strftime('%y%m%d')}_新規チャット"
 
         if st.session_state.get('chat_title'):
-            chat_data = {
-                key: copy.deepcopy(st.session_state[key])
-                for key in config.SNAPSHOT_KEYS
-                if key in st.session_state
-            }
-
-            # --- バグ修正: 状態汚染を防ぐためのファイアウォール（保護処理） ---
+            # スナップショット生成を共通モジュールに委譲
+            chat_data = session_state_manager.build_snapshot_from_session()
             original_title = st.session_state['chat_title']
 
             try:

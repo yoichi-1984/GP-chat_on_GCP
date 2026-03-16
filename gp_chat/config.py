@@ -100,6 +100,18 @@ SNAPSHOT_KEYS = [
     "python_canvases"
 ]
 
+# --- Phase 2 追加: 正規化バリデーション用定数 ---
+VALID_MESSAGE_ROLES = {"system", "user", "assistant"}
+VALID_REASONING_EFFORTS = {"high", "low"}
+DEFAULT_MODEL_ID = "gemini-3.1-pro-preview"
+
+SESSION_STATE_DEFAULTS.update({
+    "uploader_key_counter": 0,
+    "clear_uploader": False,
+    "last_pasted_hash": None,
+    "history_ui_key_counter": 0,
+})
+
 AVAILABLE_MODELS = ["gemini-3.1-pro-preview","gemini-3-pro-preview", "gemini-3-flash-preview"]
 
 class UITexts:
