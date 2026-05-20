@@ -10,6 +10,9 @@ COPY pyproject.toml .
 COPY . .
 
 # 依存関係インストール (pyproject.tomlの内容が入ります)
+# Keep packaging tooling current so old vendored jaraco.* from setuptools is not left in the image.
+RUN python -m pip install --no-cache-dir --upgrade "pip" "setuptools>=80.10.2" "wheel"
+
 RUN pip install --no-cache-dir .
 
 # Cloud Run設定

@@ -103,7 +103,7 @@ SNAPSHOT_KEYS = [
 # --- Phase 2 追加: 正規化バリデーション用定数 ---
 VALID_MESSAGE_ROLES = {"system", "user", "assistant"}
 VALID_REASONING_EFFORTS = {"high", "low"}
-DEFAULT_MODEL_ID = "gemini-3.1-pro-preview"
+DEFAULT_MODEL_ID = "gemini-3.5-flash"
 
 SESSION_STATE_DEFAULTS.update({
     "uploader_key_counter": 0,
@@ -112,7 +112,7 @@ SESSION_STATE_DEFAULTS.update({
     "history_ui_key_counter": 0,
 })
 
-AVAILABLE_MODELS = ["gemini-3.1-pro-preview","gemini-3-pro-preview", "gemini-3-flash-preview"]
+AVAILABLE_MODELS = ["gemini-3.5-flash","gemini-3.1-pro-preview","gemini-3-pro-preview", "gemini-3-flash-preview"]
 
 class UITexts:
     APP_TITLE = "🤖GP-Chat 汎用AIアプリ with Gemini"

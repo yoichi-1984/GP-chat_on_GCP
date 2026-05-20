@@ -31,6 +31,12 @@ TARGET_URL = f"http://127.0.0.1:{STREAMLIT_PORT}"
 # ★修正: .envがない場合でも本番のURLに飛ぶようにフォールバックを設定
 HOSTING_URL = os.getenv("HOSTING_URL",)
 
+
+def get_login_redirect_url():
+    if HOSTING_URL:
+        return f"{HOSTING_URL.rstrip('/')}/login/"
+    return "/login/"
+
 # 2. JSONファイルから許可IPリストおよび許可オリジン(CORS)をロード
 ALLOWED_NETWORKS = []
 ALLOW_ORIGINS = []
@@ -95,9 +101,10 @@ async def lifespan(app: FastAPI):
         "--server.enableCORS", "false",
         "--server.enableXsrfProtection", "false",
         "--server.enableWebsocketCompression", "false",
-        "--server.baseUrlPath", "", 
+        "--server.disconnectedSessionTTL", "3500",
+        "--server.baseUrlPath", "",
     ]
-    log(f"🚀 Starting Streamlit: {' '.join(cmd)}")
+    log(f"Starting Streamlit: {' '.join(cmd)}")
     process = subprocess.Popen(cmd, env=env)
 
     # ヘルスチェック (Streamlitが立ち上がるまで待機)
@@ -114,6 +121,22 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(1)
         else:
             log("❌ Streamlit failed to start in time.")
+
+    if process.poll() is not None:
+        raise RuntimeError("Streamlit process exited before the proxy became ready.")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            health_resp = await client.get(f"{TARGET_URL}/_stcore/health")
+        if health_resp.status_code != 200:
+            raise RuntimeError(f"Unexpected Streamlit health status: {health_resp.status_code}")
+    except Exception as exc:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        raise RuntimeError("Streamlit did not pass final health verification.") from exc
 
     yield
 
@@ -228,16 +251,17 @@ async def websocket_proxy(ws: WebSocket, path: str):
     # WebSocket接続前のHTTPハンドシェイクでIP制限は通過済み
 
     protocols = ws.headers.get("sec-websocket-protocol")
-    subprotocol = protocols.split(",")[0].strip() if protocols else None
-    await ws.accept(subprotocol=subprotocol)
+    requested_subprotocols = [p.strip() for p in protocols.split(",") if p.strip()] if protocols else []
 
-    # ★追加: WebSocket通信時にもCookieからユーザーID(UID)を抽出する
+    # WebSocket通信時にもCookieからユーザーID(UID)を抽出する
     user_uid = "unknown"
+    user_email = "unknown"
     cookie = ws.cookies.get("session")
     if cookie:
         try:
             decoded_claims = auth.verify_session_cookie(cookie, check_revoked=False)
             user_uid = decoded_claims.get("uid", "unknown")
+            user_email = decoded_claims.get("email", "unknown")
         except:
             pass
 
@@ -247,7 +271,7 @@ async def websocket_proxy(ws: WebSocket, path: str):
         ws_url += f"?{ws.query_params}"
 
     # ★追加: StreamlitへのWebSocket接続時にUIDをヘッダーとして渡す
-    extra_headers = {"X-User-UID": user_uid}
+    extra_headers = {"X-User-UID": user_uid, "X-User-Email": user_email}
 
     try:
         # ライブラリのバージョン差異を吸収するための安全な接続処理
@@ -262,7 +286,13 @@ async def websocket_proxy(ws: WebSocket, path: str):
         except Exception:
             connect_kwargs["extra_headers"] = extra_headers
 
+        if requested_subprotocols:
+            connect_kwargs["subprotocols"] = requested_subprotocols
+
         async with websockets.connect(ws_url, **connect_kwargs) as ws_server:
+            selected_subprotocol = ws_server.subprotocol or (requested_subprotocols[0] if requested_subprotocols else None)
+            await ws.accept(subprotocol=selected_subprotocol)
+
             # Client -> Server
             async def client_to_server():
                 try:
@@ -304,6 +334,8 @@ async def proxy_handler(request: Request, path: str):
         return await request.body() 
 
     # 静的ファイル判定 (Streamlitの仕様に基づく)
+    user_email = "unknown"
+
     is_static = (
         path.startswith("static/") or 
         path.startswith("_stcore/") or 
@@ -325,14 +357,15 @@ async def proxy_handler(request: Request, path: str):
         if not cookie:
             # ブラウザからのアクセスならログインページへ、APIなら401
             if "text/html" in request.headers.get("accept", ""):
-                return RedirectResponse(f"{HOSTING_URL}/login/")
+                return RedirectResponse(get_login_redirect_url())
             return Response(status_code=401)
         try:
             # decoded_claims を受け取り、uid を抽出する
             decoded_claims = auth.verify_session_cookie(cookie, check_revoked=True)
             user_uid = decoded_claims.get("uid", "unknown")
+            user_email = decoded_claims.get("email", "unknown")
         except:
-            return RedirectResponse(f"{HOSTING_URL}/login/")
+            return RedirectResponse(get_login_redirect_url())
 
     # リクエストの転送
     target_path = f"/{path}" if path else "/"
@@ -345,6 +378,7 @@ async def proxy_handler(request: Request, path: str):
     req_headers.pop("host", None)
     req_headers.pop("content-length", None)
     req_headers["X-User-UID"] = user_uid
+    req_headers["X-User-Email"] = user_email
 
     try:
         body = await request.body()
